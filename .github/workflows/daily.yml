@@ -1,0 +1,27 @@
+name: Daily Selenium Run
+
+on:
+  schedule:
+    - cron: "30 12 * * *"   # 6:00 PM IST (UTC+5:30)
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run selenium script (auto-stop after 2 min)
+        run: |
+          timeout 120 python typeformkalvium.py

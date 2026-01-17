@@ -285,7 +285,7 @@ try:
     
     # Verification section (runs in both modes)
     print("\n📊 Verifying today's record...")
-    from datetime import datetime
+    from datetime import datetime, timedelta
     today = datetime.now().strftime("%d %b %Y")
     print(f"📅 Looking for: {today}")
     
@@ -336,6 +336,191 @@ try:
     
     def timeout_handler(signum, frame):
         raise TimeoutError()
+
+    def _open_completed_table():
+        """Ensure the Completed accordion is open and return its table element."""
+        try:
+            completed_btn = driver.execute_script("""
+                return Array.from(document.querySelectorAll('button'))
+                    .find(b => b.textContent.trim().toLowerCase().startsWith('completed'));
+            """)
+
+            if not completed_btn:
+                return None
+
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", completed_btn)
+
+            if driver.execute_script("return arguments[0].getAttribute('aria-expanded');", completed_btn) == 'false':
+                driver.execute_script("arguments[0].click();", completed_btn)
+
+            wait.until(lambda d: d.execute_script("""
+                let tables = Array.from(document.querySelectorAll('table'));
+                return tables.some(t => {
+                    let headers = Array.from(t.querySelectorAll('th')).map(th => th.textContent.trim().toLowerCase());
+                    return headers.includes('submitted at');
+                });
+            """))
+
+            table = driver.execute_script("""
+                let tables = Array.from(document.querySelectorAll('table'));
+                return tables.find(t => {
+                    let headers = Array.from(t.querySelectorAll('th')).map(th => th.textContent.trim().toLowerCase());
+                    return headers.includes('submitted at');
+                });
+            """)
+
+            return table
+        except Exception as e:
+            print(f"⚠️  Could not open Completed accordion: {e}")
+            return None
+
+    def fetch_submitted_map():
+        try:
+            table = _open_completed_table()
+            if not table:
+                return {}
+
+            return driver.execute_script("""
+                let target = arguments[0];
+                let map = {};
+                if (target) {
+                    let rows = target.querySelectorAll('tbody tr');
+                    for (let row of rows) {
+                        let cells = row.querySelectorAll('td');
+                        if (cells.length >= 2) {
+                            let date = cells[0].textContent.trim();
+                            let submitted = cells[1].textContent.trim();
+                            map[date] = submitted;
+                        }
+                    }
+                }
+                return map;
+            """, table) or {}
+        except Exception as e:
+            print(f"⚠️  Could not fetch submitted times: {e}")
+            return {}
+
+    def fetch_descriptions_for_dates(dates):
+        """Return map of date string -> description text from the Completed 'view' sidebar."""
+        results = {}
+        try:
+            table = _open_completed_table()
+            if not table:
+                print("⚠️  Completed table not found for descriptions")
+                return results
+
+            for date_str in dates:
+                try:
+                    row = driver.execute_script("""
+                        let target = arguments[0];
+                        let dt = arguments[1];
+                        if (!target) return null;
+                        let rows = Array.from(target.querySelectorAll('tbody tr'));
+                        return rows.find(r => {
+                            let cells = r.querySelectorAll('td');
+                            return cells.length && cells[0].textContent.trim() === dt;
+                        }) || null;
+                    """, table, date_str)
+
+                    if not row:
+                        results[date_str] = None
+                        continue
+
+                    view_btn = driver.execute_script("""
+                        let btn = arguments[0].querySelector('button');
+                        return btn || null;
+                    """, row)
+
+                    if view_btn:
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", view_btn)
+                        driver.execute_script("arguments[0].click();", view_btn)
+                    else:
+                        results[date_str] = None
+                        continue
+
+                    # Wait for the dialog to show the correct date
+                    matched = False
+                    for _ in range(10):
+                        time.sleep(0.4)
+                        matched = driver.execute_script("""
+                            let dt = arguments[0];
+                            let dialog = document.querySelector('[role="dialog"]');
+                            if (!dialog) return false;
+                            let span = dialog.querySelector('span.text-xs');
+                            return span && span.textContent.trim() === dt;
+                        """, date_str)
+                        if matched:
+                            break
+
+                    desc = driver.execute_script("""
+                        let dialog = document.querySelector('[role="dialog"]');
+                        if (!dialog) return null;
+                        let prose = dialog.querySelector('.tiptap.ProseMirror');
+                        return prose ? prose.innerText.trim() : null;
+                    """) if matched else None
+
+                    # Close dialog if close button exists
+                    try:
+                        close_btn = driver.execute_script("""
+                            let dialog = document.querySelector('[role="dialog"]');
+                            if (!dialog) return null;
+                            return dialog.querySelector('button[type="button"]');
+                        """)
+                        if close_btn:
+                            driver.execute_script("arguments[0].click();", close_btn)
+                            time.sleep(0.2)
+                    except Exception:
+                        pass
+
+                    results[date_str] = desc if desc else None
+                except Exception:
+                    results[date_str] = None
+        except Exception as e:
+            print(f"⚠️  Could not fetch descriptions: {e}")
+        return results
+
+    def format_description(desc: str) -> str:
+        """Pretty-print description; box it if multiline."""
+        if not desc:
+            return ""
+        if '\n' not in desc:
+            return desc
+        lines = desc.splitlines()
+        width = max(len(line) for line in lines)
+        top = "_" * (width + 4)
+        body = [f"| {line.ljust(width)} |" for line in lines]
+        bottom = "‾" * (width + 4)
+        return "\n".join([top, *body, bottom])
+
+    def fetch_main_records():
+        """Return rows from the main worklog table (not the Completed accordion)."""
+        try:
+            return driver.execute_script("""
+                // Find a table that looks like the main status table (Date + Status columns, no 'Submitted at')
+                let tables = Array.from(document.querySelectorAll('table'));
+                let main = tables.find(t => {
+                    let headers = Array.from(t.querySelectorAll('th')).map(th => th.textContent.trim().toLowerCase());
+                    return headers.includes('date') && headers.includes('status') && !headers.includes('submitted at');
+                });
+
+                if (!main) return [];
+
+                let rows = main.querySelectorAll('tbody tr');
+                let records = [];
+                for (let row of rows) {
+                    let cells = row.querySelectorAll('td');
+                    if (cells.length >= 2) {
+                        records.push({
+                            date: cells[0].textContent.trim(),
+                            status: cells[1].textContent.trim()
+                        });
+                    }
+                }
+                return records;
+            """) or []
+        except Exception as e:
+            print(f"⚠️  Could not fetch main table records: {e}")
+            return []
     
     # Set up signal handler for timeout
     signal.signal(signal.SIGALRM, timeout_handler)
@@ -344,7 +529,7 @@ try:
         try:
             print("\n" + "="*50)
             signal.alarm(120)  # 2 minute timeout
-            response = input("📋 Show records? (y/r/n) - y: last 5, r: replay/monthly report, n: exit (2min timeout): ").strip().lower()
+            response = input("📋 Show records? (y/r/n) - y: weekly view, r: replay/monthly report, n: exit (2min timeout): ").strip().lower()
             signal.alarm(0)  # Cancel alarm after input received
             
             if response in ['n', 'no', 'exit']:
@@ -353,63 +538,108 @@ try:
             
             elif response in ['y', 'yes']:
                 # Fetch all records from the table
-                all_records = driver.execute_script("""
-                    let rows = document.querySelectorAll('tbody tr');
-                    let records = [];
-                    for (let row of rows) {
-                        let cells = row.querySelectorAll('td');
-                        if (cells.length >= 2) {
-                            records.push({
-                                date: cells[0].textContent.trim(),
-                                status: cells[1].textContent.trim()
-                            });
-                        }
-                    }
-                    return records;
-                """)
+                all_records = fetch_main_records()
+
+                submitted_map = fetch_submitted_map()
                 
                 if not all_records:
                     print("❌ No records found in table")
                 else:
-                    offset = 0
-                    batch_size = 5
-                    
-                    while offset < len(all_records):
+                    # Parse and group by ISO week (Mon-Sun), starting from current week
+                    parsed = []
+                    for record in all_records:
+                        try:
+                            date_obj = datetime.strptime(record['date'], "%d %b %Y")
+                            parsed.append({
+                                'date_str': record['date'],
+                                'date_obj': date_obj,
+                                'status': record['status']
+                            })
+                        except Exception as e:
+                            print(f"⚠️  Skipping unparsable date {record['date']}: {e}")
+                            continue
+
+                    if not parsed:
+                        print("❌ No parsable records found")
+                        continue
+
+                    # Sort desc by date
+                    parsed.sort(key=lambda r: r['date_obj'], reverse=True)
+
+                    # Bucket by week starting Monday
+                    weeks = {}
+                    for rec in parsed:
+                        start = rec['date_obj'] - timedelta(days=rec['date_obj'].weekday())
+                        weeks.setdefault(start, []).append(rec)
+
+                    # Ordered week starts (latest first)
+                    ordered_starts = sorted(weeks.keys(), reverse=True)
+                    idx = 0
+
+                    while idx < len(ordered_starts):
+                        week_start = ordered_starts[idx]
+                        week_end = week_start + timedelta(days=6)
+                        week_label = f"Week: {week_start:%d %b %Y} - {week_end:%d %b %Y}"
+
+                        # Sort week records ascending by date for readability
+                        week_records = sorted(weeks[week_start], key=lambda r: r['date_obj'])
+
+                        # Render the week block once per iteration
                         print("\n" + "="*50)
-                        batch = all_records[offset:offset + batch_size]
-                        
-                        for record in batch:
-                            print(f"📅 {record['date']:<15} | Status: {record['status']}")
-                        
-                        offset += batch_size
-                        
-                        if offset >= len(all_records):
-                            print("\n✅ End of records reached!")
+                        print(week_label)
+                        for rec in week_records:
+                            submitted_at = submitted_map.get(rec['date_str'], '---') if submitted_map else '---'
+                            print(f"📅 {rec['date_str']:<15} | Status: {rec['status']:<30} | Submitted: {submitted_at}")
+
+                        showed_details = False
+                        user_aborted = False
+
+                        while True:
+                            prompt = "\n📋 Show previous week? (y/n): " if showed_details else "\n📋 Show previous week? (y/n) or show what you filled ? (a): "
+                            choice = input(prompt).strip().lower()
+
+                            if choice == 'a' and not showed_details:
+                                dates = [r['date_str'] for r in week_records]
+                                desc_map = fetch_descriptions_for_dates(dates)
+
+                                print(f"\n🧾 What you filled for {week_label}")
+                                printed = 0
+                                for rec in week_records:
+                                    submitted_at = submitted_map.get(rec['date_str'], '---') if submitted_map else '---'
+                                    desc = desc_map.get(rec['date_str'])
+                                    if not desc:
+                                        continue
+                                    print("-"*50)
+                                    print(f"📅 {rec['date_str']} | Status: {rec['status']} | Submitted: {submitted_at}")
+                                    print("📝 Description:")
+                                    print(format_description(desc))
+                                    printed += 1
+
+                                if printed == 0:
+                                    print("(No descriptions available for this week)")
+                                else:
+                                    print("-"*50)
+
+                                showed_details = True
+                                # After showing details, re-ask without the 'a' option
+                                continue
+
+                            if choice in ['y', 'yes']:
+                                idx += 1
+                                break
+
+                            # Any non-yes response stops weekly navigation
+                            idx = len(ordered_starts)
+                            user_aborted = True
                             break
-                        
-                        remaining = len(all_records) - offset
-                        print(f"\n({remaining} more records available)")
-                        more = input("📋 Show next 5 records? (y/n): ").strip().lower()
-                        
-                        if more not in ['y', 'yes']:
+
+                        if idx >= len(ordered_starts) and not user_aborted:
+                            print("\n✅ End of records reached!")
                             break
             
             elif response in ['r', 'replay']:
                 # Fetch all records
-                all_records = driver.execute_script("""
-                    let rows = document.querySelectorAll('tbody tr');
-                    let records = [];
-                    for (let row of rows) {
-                        let cells = row.querySelectorAll('td');
-                        if (cells.length >= 2) {
-                            records.push({
-                                date: cells[0].textContent.trim(),
-                                status: cells[1].textContent.trim()
-                            });
-                        }
-                    }
-                    return records;
-                """)
+                all_records = fetch_main_records()
                 
                 if not all_records:
                     print("❌ No records found in table")
