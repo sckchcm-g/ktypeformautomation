@@ -55,6 +55,10 @@ profile_dir = Path.home() / ".selenium_chrome_profile"
 profile_dir.mkdir(exist_ok=True)
 options.add_argument(f"--user-data-dir={profile_dir}")
 
+# Skip profile selection screen
+options.add_argument("--no-first-run")
+options.add_argument("--no-default-browser-check")
+
 # Ensure cookies are enabled
 prefs = {
     "profile.default_content_setting_values.cookies": 1,
@@ -181,20 +185,34 @@ try:
     else:
         print("🔍 Looking for 'Complete' button in table...")
         time.sleep(2)
-    
-    # Search for Complete button in table rows
-    complete_btn = driver.execute_script("""
-        let rows = document.querySelectorAll('tr');
-        for (let row of rows) {
-            let buttons = row.querySelectorAll('button');
-            for (let btn of buttons) {
-                if (btn.textContent.toLowerCase().includes('complete')) {
-                    return btn;
+
+    print("⏳ Watching for 'Complete' button (up to 60s)...")
+
+    timeout = 60
+    interval = 2
+    end_time = time.time() + timeout
+    complete_btn = None
+
+    while time.time() < end_time:
+        complete_btn = driver.execute_script("""
+            let rows = document.querySelectorAll('tr');
+            for (let row of rows) {
+                let buttons = row.querySelectorAll('button');
+                for (let btn of buttons) {
+                    if (btn.textContent.toLowerCase().includes('complete')) {
+                        return btn;
+                    }
                 }
             }
-        }
-        return null;
-    """)
+            return null;
+        """)
+
+        if complete_btn:
+            print("✅ Found 'Complete' button!")
+            break
+
+    print("⏳ Not found yet, retrying...")
+    time.sleep(interval)
     
     if complete_btn and not TEST_MODE:
         print("✅ Found 'Complete' button! Clicking...")
