@@ -2,7 +2,8 @@ name: Daily Selenium Run
 
 on:
   schedule:
-    - cron: "30 12 * * *"   # 6:00 PM IST (UTC+5:30)
+    - cron: "0 7 * * *"     # 12:30 PM IST (UTC+5:30)
+    - cron: "0 12 * * *"    # 5:30 PM IST (UTC+5:30)
   workflow_dispatch:
 
 jobs:
@@ -36,7 +37,48 @@ jobs:
           HEADLESS: "1"
           TEST_MODE: "0"
         run: |
-          timeout 1200 python typeformkalvium.py
+          set -o pipefail
+          timeout 1200 python typeformkalvium.py 2>&1 | tee automation.log
+
+      - name: Email failure logs
+        if: ${{ failure() }}
+        env:
+          EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          SEND_EMAIL_TO: ${{ secrets.SEND_EMAIL_TO }}
+        run: |
+          python - <<'PY'
+          import os
+          import smtplib
+          from email.mime.text import MIMEText
+
+          sender = (os.getenv("EMAIL_USERNAME") or "").strip()
+          pwd = (os.getenv("EMAIL_APP_PASSWORD") or "").strip()
+          to_addr = (os.getenv("SEND_EMAIL_TO") or sender).strip()
+
+          if not sender or not pwd or not to_addr:
+              print("⚠️ Missing SMTP details; skipping failure email.")
+              raise SystemExit(0)
+
+          try:
+              with open("automation.log", "r", encoding="utf-8", errors="ignore") as f:
+                  log = f.read()
+          except Exception:
+              log = "(No automation.log found)"
+
+          body = "Daily Selenium workflow failed.\n\nRecent logs:\n\n" + log[-8000:]
+          msg = MIMEText(body)
+          msg["Subject"] = "[ktypeformautomation] Daily workflow failed"
+          msg["From"] = sender
+          msg["To"] = to_addr
+
+          with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
+              s.starttls()
+              s.login(sender, pwd)
+              s.sendmail(sender, [to_addr], msg.as_string())
+
+          print(f"✅ Failure email sent to {to_addr}")
+          PY
 
       - name: Update AUTH_STATE secret if refreshed
         if: ${{ always() && hashFiles('auth.json') != '' }}

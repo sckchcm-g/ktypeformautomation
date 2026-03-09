@@ -2,10 +2,17 @@ import requests
 import datetime
 import time
 import math
+import os
 from collections import defaultdict
 
 # ================== CONFIG ==================
-TOKEN = input("Paste your GitHub token: ").strip()
+TOKEN = (os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN") or "").strip()
+if not TOKEN:
+    TOKEN = input("Paste your GitHub token: ").strip()
+
+if not TOKEN:
+    raise SystemExit("❌ Missing GitHub token. Set GITHUB_TOKEN/GH_TOKEN or provide via prompt.")
+
 HEADERS = {
     "Authorization": f"token {TOKEN}",
     "Accept": "application/vnd.github+json",

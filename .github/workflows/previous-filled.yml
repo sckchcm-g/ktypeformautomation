@@ -1,0 +1,49 @@
+name: Previous Filled Report
+
+on:
+  workflow_dispatch:
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run previous-filled report
+        env:
+          EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          AUTH_STATE: ${{ secrets.AUTH_STATE }}
+          WORK_TYPE: ${{ secrets.WORK_TYPE }}
+          SAVE_AUTH_STATE: "1"
+          HEADLESS: "1"
+          TEST_MODE: "1"
+          REPORT_MODE: "filled"
+        run: |
+          timeout 1200 python typeformkalvium.py
+
+      - name: Rotate AUTH_STATE secret if refreshed
+        if: ${{ always() && hashFiles('auth.json') != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "GH_TOKEN secret missing; skipping AUTH_STATE rotation."
+            exit 0
+          fi
+          gh secret set AUTH_STATE --repo sckchcm-g/ktypeformautomation < auth.json
+          echo "AUTH_STATE secret updated from auth.json"

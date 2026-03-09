@@ -23,6 +23,7 @@ SAVE_AUTH_STATE = os.getenv("SAVE_AUTH_STATE", "0").strip().lower() in {"1", "tr
 AUTH_STATE_FILE = Path("auth.json")
 HEADLESS = os.getenv("HEADLESS", "0").strip().lower()  # '1' or 'true' enables headless
 TEST_MODE = os.getenv("TEST_MODE", "0").strip().lower() in {"1", "true", "yes"}
+REPORT_MODE = os.getenv("REPORT_MODE", "").strip().lower()  # filled | replay
 CI_MODE = (
     os.getenv("CI_MODE", "").strip().lower() in {"1", "true", "yes"}
     or os.getenv("GITHUB_ACTIONS", "").strip().lower() == "true"
@@ -581,12 +582,6 @@ try:
     # Interactive record viewer with timeout and loop
     import signal
 
-    interactive_enabled = (not CI_MODE) and (not is_headless) and sys.stdin.isatty()
-    if not interactive_enabled:
-        print("ℹ️  Skipping interactive record viewer (CI/headless/non-interactive mode).")
-        print("\n👋 Closing browser...")
-        raise SystemExit(0)
-    
     class TimeoutError(Exception):
         pass
     
@@ -777,6 +772,122 @@ try:
         except Exception as e:
             print(f"⚠️  Could not fetch main table records: {e}")
             return []
+
+    def run_report_mode(mode: str):
+        mode = (mode or "").strip().lower()
+        if mode not in {"filled", "replay"}:
+            print(f"ℹ️  REPORT_MODE '{mode}' not recognized. Supported: filled, replay")
+            return
+
+        if mode == "replay":
+            all_records = fetch_main_records()
+            if not all_records:
+                print("❌ No records found in table")
+                return
+
+            print("\n📊 Monthly Replay Report")
+            print("="*60)
+
+            from collections import defaultdict
+            monthly_data = defaultdict(lambda: {'working': 0, 'absent': 0, 'week_off': 0})
+            seen_dates = set()
+
+            for record in all_records:
+                try:
+                    date_str = record['date']
+                    if date_str in seen_dates:
+                        continue
+                    seen_dates.add(date_str)
+
+                    date_obj = datetime.strptime(date_str, "%d %b %Y")
+                    month_key = date_obj.strftime("%B %Y")
+                    status = record['status'].lower().strip()
+
+                    if status in ['absent', '-', '']:
+                        monthly_data[month_key]['absent'] += 1
+                    elif 'week off' in status or 'holiday' in status or 'leave' in status:
+                        monthly_data[month_key]['week_off'] += 1
+                    else:
+                        monthly_data[month_key]['working'] += 1
+                except Exception as e:
+                    print(f"⚠️  Could not parse record: {record.get('date')} - {e}")
+
+            for month in sorted(monthly_data.keys(), key=lambda x: datetime.strptime(x, "%B %Y"), reverse=True):
+                data = monthly_data[month]
+                total = data['working'] + data['absent'] + data['week_off']
+                print(f"\n📅 {month}")
+                print(f"   ✅ Working Days:  {data['working']}")
+                print(f"   ❌ Absents:       {data['absent']}")
+                print(f"   🏖️  Week Offs:     {data['week_off']}")
+                print(f"   📊 Total Days:    {total}")
+                print("-"*60)
+            return
+
+        # mode == "filled"
+        all_records = fetch_main_records()
+        submitted_map = fetch_submitted_map()
+
+        if not all_records:
+            print("❌ No records found in table")
+            return
+
+        parsed = []
+        for record in all_records:
+            try:
+                date_obj = datetime.strptime(record['date'], "%d %b %Y")
+                parsed.append({
+                    'date_str': record['date'],
+                    'date_obj': date_obj,
+                    'status': record['status']
+                })
+            except Exception:
+                continue
+
+        if not parsed:
+            print("❌ No parsable records found")
+            return
+
+        current_week_start = datetime.now() - timedelta(days=datetime.now().weekday())
+        week_records = sorted(
+            [r for r in parsed if (r['date_obj'] - timedelta(days=r['date_obj'].weekday())).date() == current_week_start.date()],
+            key=lambda r: r['date_obj']
+        )
+
+        if not week_records:
+            print("ℹ️  No records for current week")
+            return
+
+        week_end = current_week_start + timedelta(days=6)
+        week_label = f"Week: {current_week_start:%d %b %Y} - {week_end:%d %b %Y}"
+        dates = [r['date_str'] for r in week_records]
+        desc_map = fetch_descriptions_for_dates(dates)
+
+        print(f"\n🧾 What you filled for {week_label}")
+        printed = 0
+        for rec in week_records:
+            submitted_at = submitted_map.get(rec['date_str'], '---') if submitted_map else '---'
+            desc = desc_map.get(rec['date_str'])
+            if not desc:
+                continue
+            print("-"*50)
+            print(f"📅 {rec['date_str']} | Status: {rec['status']} | Submitted: {submitted_at}")
+            print("📝 Description:")
+            print(format_description(desc))
+            printed += 1
+        if printed == 0:
+            print("(No descriptions available for this week)")
+        else:
+            print("-"*50)
+
+    interactive_enabled = (not CI_MODE) and (not is_headless) and sys.stdin.isatty()
+    if not interactive_enabled:
+        if REPORT_MODE:
+            print(f"📋 Running non-interactive report mode: {REPORT_MODE}")
+            run_report_mode(REPORT_MODE)
+        else:
+            print("ℹ️  Skipping interactive record viewer (CI/headless/non-interactive mode).")
+        print("\n👋 Closing browser...")
+        raise SystemExit(0)
     
     # Set up signal handler for timeout
     signal.signal(signal.SIGALRM, timeout_handler)
