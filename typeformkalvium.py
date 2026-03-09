@@ -528,9 +528,15 @@ try:
             driver.refresh()
             time.sleep(3)
             # Re-check: if button is gone after refresh, we're good
-            if not _find_continue_with_google_button(driver):
+            google_btn = _find_continue_with_google_button(driver)
+            if not google_btn:
                 print("   ✅ Refresh worked — login page gone!")
                 break
+
+        # Re-find button to avoid stale element reference (DOM rebuilt after refresh/navigation)
+        google_btn = _find_continue_with_google_button(driver)
+        if not google_btn:
+            break  # Button gone — authenticated now
 
         print(f"   Clicking Google login button...")
         driver.execute_script("arguments[0].click();", google_btn)
