@@ -116,6 +116,11 @@ def _apply_auth_state(driver, state):
     """
     Apply cookies + optional localStorage from auth state.
 
+    Uses Chrome DevTools Protocol (CDP) to set cookies WITHOUT navigating to
+    each domain — this avoids triggering SPA loads that overwrite our cookies.
+    Playwright's storageState works the same way (cookies injected at the
+    browser-context level before any request).
+
     Supports Playwright-like storage state format:
       {
         "cookies": [...],
@@ -133,63 +138,78 @@ def _apply_auth_state(driver, state):
         print("⚠️  AUTH_STATE has no cookies/origins; ignoring.")
         return False
 
-    # Group cookies by domain so we can navigate once per domain before add_cookie
-    cookies_by_domain = {}
-    for c in cookies:
-        domain = (c.get("domain") or "").lstrip(".")
-        if not domain:
-            continue
-        cookies_by_domain.setdefault(domain, []).append(c)
-
     applied_count = 0
     rejected_count = 0
 
-    for domain, domain_cookies in cookies_by_domain.items():
-        try:
-            driver.get(f"https://{domain}")
-            time.sleep(0.5)
-
-            # Clear server-set cookies BEFORE adding ours so they don't conflict
-            driver.delete_all_cookies()
-
-            for raw_cookie in domain_cookies:
-                cookie = _normalize_cookie(raw_cookie)
-                if not cookie:
-                    continue
-                try:
-                    driver.add_cookie(cookie)
-                    applied_count += 1
-                except Exception as e:
-                    rejected_count += 1
-                    if rejected_count <= 5:  # log first few for debugging
-                        print(f"  ⚠️  Cookie rejected ({cookie.get('name')}): {e}")
-        except Exception:
+    # Set cookies via CDP — no navigation needed (like Playwright storageState)
+    for raw_cookie in cookies:
+        name = raw_cookie.get("name")
+        value = raw_cookie.get("value", "")
+        domain = raw_cookie.get("domain", "")
+        if not name or not domain:
             continue
 
-    # Apply localStorage entries for each origin if present
+        cdp_cookie = {
+            "name": name,
+            "value": value,
+            "domain": domain,
+            "path": raw_cookie.get("path", "/"),
+            "secure": raw_cookie.get("secure", False),
+            "httpOnly": raw_cookie.get("httpOnly", False),
+        }
+
+        # Handle expiry/expires
+        expires = raw_cookie.get("expires", raw_cookie.get("expiry"))
+        if expires is not None:
+            try:
+                cdp_cookie["expires"] = float(expires)
+            except (ValueError, TypeError):
+                pass
+
+        # Handle sameSite
+        same_site = raw_cookie.get("sameSite", "Lax")
+        if same_site in {"Strict", "Lax", "None"}:
+            cdp_cookie["sameSite"] = same_site
+
+        try:
+            driver.execute_cdp_cmd("Network.setCookie", cdp_cookie)
+            applied_count += 1
+        except Exception as e:
+            rejected_count += 1
+            if rejected_count <= 5:
+                print(f"  ⚠️  Cookie rejected ({name}): {e}")
+
+    # Apply localStorage: navigate once per origin, set values, then leave.
+    # Use about:blank-style minimal approach: navigate, set, don't wait for SPA.
+    origins_applied = 0
     for origin in origins:
         try:
             origin_url = origin.get("origin")
             if not origin_url:
                 continue
+            ls_items = origin.get("localStorage", [])
+            if not ls_items:
+                continue
+            # Navigate to origin — we need domain context for localStorage
             driver.get(origin_url)
             time.sleep(0.5)
-            for item in origin.get("localStorage", []):
-                key = item.get("name")
-                value = item.get("value")
-                if key is None:
-                    continue
-                driver.execute_script("localStorage.setItem(arguments[0], arguments[1]);", key, value)
+            # Set all localStorage items at once via a single JS call
+            items_json = json.dumps([{"k": item.get("name"), "v": item.get("value", "")} for item in ls_items if item.get("name") is not None])
+            driver.execute_script(f"""
+                let items = {items_json};
+                items.forEach(i => localStorage.setItem(i.k, i.v));
+            """)
+            origins_applied += 1
         except Exception:
             continue
 
-    print(f"🔐 Applied {applied_count} cookies from AUTH_STATE.")
+    print(f"🔐 Applied {applied_count} cookies from AUTH_STATE (via CDP).")
     if rejected_count:
         print(f"  ⚠️  {rejected_count} cookies were rejected by the browser.")
-    if origins:
-        print(f"🧠 Restored localStorage for {len(origins)} origin(s).")
+    if origins_applied:
+        print(f"🧠 Restored localStorage for {origins_applied} origin(s).")
 
-    return applied_count > 0 or len(origins) > 0
+    return applied_count > 0 or origins_applied > 0
 
 
 def _export_auth_state(driver, output_file: Path):
@@ -487,13 +507,15 @@ try:
     except Exception:
         pass
 
-    # KEY DIFFERENCE from Playwright: storageState injects cookies BEFORE the first
-    # request, but Selenium adds them AFTER a page load. A refresh forces the browser
-    # to send our cookies with a fresh HTTP request, so the server returns the
-    # authenticated page and the SPA initializes properly.
+    # KEY DIFFERENCE from old approach: We now use CDP to set cookies BEFORE any
+    # navigation (like Playwright storageState), so the first request to /internships
+    # already includes our auth cookies. However, if localStorage was also applied,
+    # we already navigated to kalvium.community (which loaded the SPA without cookies
+    # being recognized). A refresh ensures the SPA re-initializes with both cookies
+    # AND localStorage in place.
     if auth_state_applied:
-        print("🔄 Refreshing to ensure cookies take effect (Selenium ≠ Playwright storageState)...")
-        driver.refresh()
+        print("🔄 Refreshing to re-initialize SPA with auth state...")
+        driver.get("https://kalvium.community/internships")
         time.sleep(3)
         try:
             wait.until(lambda d: d.execute_script("return document.readyState") in {"interactive", "complete"})
@@ -516,11 +538,13 @@ try:
             return {
                 innerText: (b.innerText || '').trim().substring(0, 80),
                 ariaLabel: b.getAttribute('aria-label') || '',
-                classes: (b.className || '').substring(0, 100)
+                classes: (b.className || '').substring(0, 100),
+                tagName: b.tagName
             };
         """, google_btn)
         print(f"🔄 Login page detected (attempt {sso_attempt}/3)")
         print(f"   Button: text='{btn_info.get('innerText', '')}', aria='{btn_info.get('ariaLabel', '')}', classes='{btn_info.get('classes', '')[:60]}'")
+        print(f"   Current URL: {driver.current_url}")
 
         # Attempt 1: try a plain refresh first — cookies might just need a clean request
         if sso_attempt == 1 and auth_state_applied:
@@ -528,19 +552,36 @@ try:
             driver.refresh()
             time.sleep(3)
             # Re-check: if button is gone after refresh, we're good
-            google_btn = _find_continue_with_google_button(driver)
-            if not google_btn:
+            if not _find_continue_with_google_button(driver):
                 print("   ✅ Refresh worked — login page gone!")
                 break
 
-        # Re-find button to avoid stale element reference (DOM rebuilt after refresh/navigation)
+        # Always re-find the button to avoid stale element reference
         google_btn = _find_continue_with_google_button(driver)
         if not google_btn:
             break  # Button gone — authenticated now
 
+        # Use REAL click (Selenium ActionChains), not JS click.
+        # JS click bypasses event listeners; React/Next.js apps use synthetic events
+        # that only fire on real DOM clicks. The Playwright script uses real clicks too.
         print(f"   Clicking Google login button...")
-        driver.execute_script("arguments[0].click();", google_btn)
-        time.sleep(5)
+        try:
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", google_btn)
+            time.sleep(0.3)
+            google_btn.click()  # Real click — triggers React event handlers
+        except Exception:
+            # Fallback to JS click if real click fails (e.g., element obscured)
+            driver.execute_script("arguments[0].click();", google_btn)
+
+        # Wait for navigation to actually happen (OAuth redirect)
+        pre_click_url = driver.current_url
+        for _w in range(10):
+            time.sleep(1)
+            if driver.current_url != pre_click_url:
+                break
+        time.sleep(2)  # Let the redirect chain finish
+        print(f"   Post-click URL: {driver.current_url}")
+
         # After OAuth redirect, may land back on homepage — navigate back to internships
         if "/internships" not in driver.current_url:
             driver.get("https://kalvium.community/internships")
