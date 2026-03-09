@@ -245,13 +245,26 @@ def _find_continue_with_google_button(driver):
     """Find and return the Google login button element, if present."""
     return driver.execute_script("""
         let buttons = Array.from(document.querySelectorAll('button'));
-        return buttons.find(b => {
-            let t = b.textContent.toLowerCase();
+        // 1) Try text match first
+        let byText = buttons.find(b => {
+            let t = (b.textContent || '').toLowerCase();
             return (t.includes('continue with google') ||
                     t.includes('login with google') ||
                     t.includes('log in with google') ||
-                    t.includes('sign in with google'));
+                    t.includes('sign in with google') ||
+                    t.includes('google'));
         });
+        if (byText) return byText;
+        // 2) Fallback: match by the distinctive CSS classes on the Kalvium login button
+        let byCss = document.querySelector('button.border-gray-800.bg-white.text-gray-800');
+        if (byCss) return byCss;
+        // 3) Broader fallback: button containing a Google SVG/icon
+        let byIcon = buttons.find(b => {
+            let svg = b.querySelector('svg');
+            let img = b.querySelector('img[src*="google"], img[alt*="oogle"]');
+            return (svg && b.className.includes('border')) || img;
+        });
+        return byIcon || null;
     """)
 
 
