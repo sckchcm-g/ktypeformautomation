@@ -297,6 +297,12 @@ if is_headless:
 else:
     print("🎯 Headless: OFF")
 
+# CI-critical flags (required on Linux / GitHub Actions)
+if CI_MODE or is_headless:
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-extensions")
+
 driver = webdriver.Chrome(options=options)
 wait = WebDriverWait(driver, 20)
 auth_state = _load_auth_state()
@@ -315,15 +321,20 @@ try:
             auth_state_refresh_needed = True
 
     # Step 1: Check if Google is already logged in (via auth state or Chrome profile)
-    print("🔐 Step 1: Checking Google account status...")
-    driver.get("https://accounts.google.com")
-    time.sleep(3)
-
-    needs_login = not _is_google_logged_in(driver)
-    if needs_login:
-        print("❌ Not logged into Google, need to login")
+    # If auth state was applied, skip the Google check — navigating to accounts.google.com
+    # can invalidate cookies or cause session interference (the Playwright script never does this).
+    if auth_state_applied:
+        print("🔐 Step 1: Skipping Google check (AUTH_STATE applied, trusting session)")
+        needs_login = False
     else:
-        print("✅ Already logged into Google via Chrome profile!")
+        print("🔐 Step 1: Checking Google account status...")
+        driver.get("https://accounts.google.com")
+        time.sleep(3)
+        needs_login = not _is_google_logged_in(driver)
+        if needs_login:
+            print("❌ Not logged into Google, need to login")
+        else:
+            print("✅ Already logged into Google via Chrome profile!")
     
     if needs_login:
         if CI_MODE and not ALLOW_UI_LOGIN_IN_CI:
@@ -413,12 +424,33 @@ try:
         wait.until(lambda d: d.execute_script("return document.readyState") in {"interactive", "complete"})
     except Exception:
         pass
+
+    # Wait for the SPA table to actually render (not just document.readyState)
+    print("⏳ Waiting for internships table to render...")
+    table_loaded = False
+    for _t in range(30):
+        table_loaded = driver.execute_script("""
+            let tables = document.querySelectorAll('table');
+            return tables.length > 0 && document.querySelectorAll('tbody tr').length > 0;
+        """)
+        if table_loaded:
+            break
+        time.sleep(1)
+    if table_loaded:
+        print("✅ Table rendered")
+    else:
+        print("⚠️  Table not found after 30s — page may not be authenticated")
+        # Dump diagnostic info for CI debugging
+        print(f"📌 Current URL: {driver.current_url}")
+        print(f"📌 Page title: {driver.title}")
+        body_text = driver.execute_script("return (document.body.innerText || '').substring(0, 500);")
+        print(f"📌 Page text (first 500 chars): {body_text}")
     
     if TEST_MODE:
         print("\n🧪 TEST MODE: Skipping form fill, only checking records...")
     else:
         print("🔍 Looking for 'Complete' button in table...")
-        time.sleep(2)
+        time.sleep(1)
 
     print("⏳ Watching for 'Complete' button (up to 60s)...")
 
@@ -426,9 +458,10 @@ try:
     interval = 2
     end_time = time.time() + timeout
     complete_btn = None
+    last_log_at = 0
 
     while time.time() < end_time:
-        # Prefer straightforward text-based lookup (Playwright-like behavior)
+        # Prefer straightforward text-based lookup (Playwright-like: text=Complete)
         candidates = driver.find_elements(
             By.XPATH,
             "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'complete')]"
@@ -446,8 +479,10 @@ try:
             print("✅ Found 'Complete' button!")
             break
 
-        remaining = max(0, int(end_time - time.time()))
-        if remaining % 10 == 0:
+        elapsed = int(time.time() - (end_time - timeout))
+        if elapsed - last_log_at >= 10:
+            last_log_at = elapsed
+            remaining = max(0, int(end_time - time.time()))
             print(f"⏳ Not found yet, retrying... ({remaining}s remaining)")
         time.sleep(interval)
     
@@ -572,6 +607,15 @@ try:
         print("✅ Test mode: Skipped form filling")
     else:
         print("❌ No 'Complete' button found. Might be 'No pending worklogs'.")
+        # CI diagnostics: dump page state so we can see what's actually there
+        print(f"📌 Current URL: {driver.current_url}")
+        print(f"📌 Page title: {driver.title}")
+        all_buttons = driver.execute_script("""
+            return Array.from(document.querySelectorAll('button')).map(b => b.textContent.trim()).filter(t => t.length > 0);
+        """)
+        print(f"📌 All buttons on page: {all_buttons}")
+        body_snippet = driver.execute_script("return (document.body.innerText || '').substring(0, 800);")
+        print(f"📌 Page text (800 chars): {body_snippet}")
     
     # Verification section (runs in both modes)
     print("\n📊 Verifying today's record...")
