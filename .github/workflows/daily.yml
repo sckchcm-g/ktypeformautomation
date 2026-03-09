@@ -84,11 +84,18 @@ jobs:
         if: ${{ always() && hashFiles('auth.json') != '' }}
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_REPO: ${{ vars.GH_REPO }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
             echo "GH_TOKEN secret missing; skipping AUTH_STATE rotation."
             exit 0
           fi
 
-          gh secret set AUTH_STATE --repo sckchcm-g/ktypeformautomation < auth.json
-          echo "AUTH_STATE secret updated from auth.json"
+          REPO_TARGET="${GH_REPO:-$GITHUB_REPOSITORY}"
+          if [ -z "$REPO_TARGET" ]; then
+            echo "Could not determine repository target for secret rotation."
+            exit 1
+          fi
+
+          gh secret set AUTH_STATE --repo "$REPO_TARGET" < auth.json
+          echo "AUTH_STATE secret updated from auth.json for $REPO_TARGET"
