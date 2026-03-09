@@ -242,10 +242,16 @@ def _is_kalvium_profile_visible(driver):
 
 
 def _find_continue_with_google_button(driver):
-    """Find and return the 'Continue with Google' button element, if present."""
+    """Find and return the Google login button element, if present."""
     return driver.execute_script("""
         let buttons = Array.from(document.querySelectorAll('button'));
-        return buttons.find(b => b.textContent.includes('Continue with Google'));
+        return buttons.find(b => {
+            let t = b.textContent.toLowerCase();
+            return (t.includes('continue with google') ||
+                    t.includes('login with google') ||
+                    t.includes('log in with google') ||
+                    t.includes('sign in with google'));
+        });
     """)
 
 
@@ -442,6 +448,23 @@ try:
     except Exception:
         pass
 
+    # Auto-handle Google SSO redirect if site still shows login page.
+    # Even with cookies applied, the Kalvium SPA sometimes needs to go through the
+    # Google OAuth redirect to establish an authenticated session. The cookies we applied
+    # make this redirect seamless (no password prompt). The site sometimes requires this
+    # twice ("double login" — a known site quirk).
+    for sso_attempt in range(1, 3):  # up to 2 attempts
+        google_btn = _find_continue_with_google_button(driver)
+        if not google_btn:
+            break  # No login button = we're authenticated
+        print(f"🔄 Login page detected (attempt {sso_attempt}/2), clicking 'Continue with Google'...")
+        driver.execute_script("arguments[0].click();", google_btn)
+        time.sleep(5)
+        # After OAuth redirect, may land back on homepage — navigate back to internships
+        if "/internships" not in driver.current_url:
+            driver.get("https://kalvium.community/internships")
+            time.sleep(3)
+
     # Wait for the SPA table to actually render (not just document.readyState)
     print("⏳ Waiting for internships table to render...")
     table_loaded = False
@@ -457,7 +480,6 @@ try:
         print("✅ Table rendered")
     else:
         print("⚠️  Table not found after 30s — page may not be authenticated")
-        # Dump diagnostic info for CI debugging
         print(f"📌 Current URL: {driver.current_url}")
         print(f"📌 Page title: {driver.title}")
         body_text = driver.execute_script("return (document.body.innerText || '').substring(0, 500);")
