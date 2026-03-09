@@ -409,6 +409,10 @@ try:
     print("📍 Navigating to /internships...")
     driver.get("https://kalvium.community/internships")
     time.sleep(3)
+    try:
+        wait.until(lambda d: d.execute_script("return document.readyState") in {"interactive", "complete"})
+    except Exception:
+        pass
     
     if TEST_MODE:
         print("\n🧪 TEST MODE: Skipping form fill, only checking records...")
@@ -424,25 +428,28 @@ try:
     complete_btn = None
 
     while time.time() < end_time:
-        complete_btn = driver.execute_script("""
-            let rows = document.querySelectorAll('tr');
-            for (let row of rows) {
-                let buttons = row.querySelectorAll('button');
-                for (let btn of buttons) {
-                    if (btn.textContent.toLowerCase().includes('complete')) {
-                        return btn;
-                    }
-                }
-            }
-            return null;
-        """)
+        # Prefer straightforward text-based lookup (Playwright-like behavior)
+        candidates = driver.find_elements(
+            By.XPATH,
+            "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'complete')]"
+        )
+
+        for btn in candidates:
+            try:
+                if btn.is_displayed() and btn.is_enabled():
+                    complete_btn = btn
+                    break
+            except Exception:
+                continue
 
         if complete_btn:
             print("✅ Found 'Complete' button!")
             break
 
-    print("⏳ Not found yet, retrying...")
-    time.sleep(interval)
+        remaining = max(0, int(end_time - time.time()))
+        if remaining % 10 == 0:
+            print(f"⏳ Not found yet, retrying... ({remaining}s remaining)")
+        time.sleep(interval)
     
     if complete_btn and not TEST_MODE:
         print("✅ Found 'Complete' button! Clicking...")
