@@ -457,26 +457,23 @@ try:
         time.sleep(1)
         driver.execute_script("arguments[0].click();", complete_btn)
         
-        print("⏳ Waiting for sidebar to open...")
-        time.sleep(3)
+        print("⏳ Waiting for sidebar/modal to open...")
+        time.sleep(2)
         
         # Step 1: Click the work type dropdown
-        print("🔍 Looking for work type dropdown...")
+        print("🔍 Looking for work type combobox...")
         try:
-            work_type_btn = wait.until(EC.presence_of_element_located((By.ID, "workType")))
+            work_type_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[role='combobox'], #workType")))
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", work_type_btn)
             time.sleep(0.5)
             driver.execute_script("arguments[0].click();", work_type_btn)
-            print("✅ Clicked work type dropdown")
+            print("✅ Clicked work type combobox")
             time.sleep(1)
             
             # Step 2: Extract and log all options
             print("\n📋 Available work type options:")
-            options = driver.execute_script("""
-                let select = document.querySelector('select[aria-hidden="true"]');
-                if (!select) return [];
-                return Array.from(select.options).map(opt => opt.value);
-            """)
+            option_nodes = wait.until(lambda d: d.find_elements(By.CSS_SELECTOR, "[role='option']"))
+            options = [opt.text.strip() for opt in option_nodes if opt.text and opt.text.strip()]
             
             for idx, opt in enumerate(options, 1):
                 marker = "👉" if opt == WORK_TYPE else "  "
@@ -491,43 +488,81 @@ try:
             
             # Step 3: Click the matching option
             if selected:
-                driver.execute_script("""
-                    let options = Array.from(document.querySelectorAll('[role="option"]'));
-                    let target = options.find(opt => opt.textContent.trim() === arguments[0]);
-                    if (target) target.click();
-                """, selected)
+                chosen = False
+                for opt in driver.find_elements(By.CSS_SELECTOR, "[role='option']"):
+                    try:
+                        if opt.text.strip() == selected and opt.is_displayed():
+                            driver.execute_script("arguments[0].click();", opt)
+                            chosen = True
+                            break
+                    except Exception:
+                        continue
+
+                if not chosen:
+                    # fallback: first visible option like Playwright `.first()`
+                    for opt in driver.find_elements(By.CSS_SELECTOR, "[role='option']"):
+                        try:
+                            if opt.is_displayed():
+                                driver.execute_script("arguments[0].click();", opt)
+                                chosen = True
+                                break
+                        except Exception:
+                            continue
+
                 time.sleep(1)
-                print("✅ Option selected")
+                print("✅ Option selected" if chosen else "⚠️  Option click not confirmed")
             
             # Step 4: Find and clear the contenteditable div
             print("\n📝 Filling work description...")
             editor = wait.until(EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "div.tiptap.ProseMirror[contenteditable='true']")
+                (By.CSS_SELECTOR, "div[contenteditable='true']")
             ))
             
-            # Clear existing content
-            driver.execute_script("arguments[0].innerHTML = '';", editor)
-            time.sleep(0.5)
-            
-            # Type new content
+            # Focus and clear editor reliably (Playwright-like select all + replace)
             driver.execute_script("arguments[0].focus();", editor)
+            time.sleep(0.2)
+            editor.click()
+            cmd_key = Keys.COMMAND if sys.platform == "darwin" else Keys.CONTROL
+            editor.send_keys(cmd_key, "a")
+            editor.send_keys(Keys.BACKSPACE)
             editor.send_keys(WORK_DESCRIPTION)
+
+            # Force TipTap update
+            editor.send_keys(Keys.ENTER)
+            time.sleep(0.5)
+
             print(f"✅ Entered description: {WORK_DESCRIPTION[:50]}...")
-            time.sleep(1)
+
+            # Scroll modal/dialog to bottom if present
+            driver.execute_script("""
+                let modal = document.querySelector('[role="dialog"]');
+                if (modal) modal.scrollTop = modal.scrollHeight;
+            """)
+            time.sleep(0.4)
             
             print("\n📤 Submitting form...")
             # Find and click submit button
-            submit_btn = wait.until(EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "button[type='submit']")
+            submit_btn = wait.until(EC.element_to_be_clickable(
+                (By.XPATH, "//button[@type='submit' and contains(normalize-space(.), 'Submit')]")
             ))
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", submit_btn)
             time.sleep(0.5)
             driver.execute_script("arguments[0].click();", submit_btn)
             print("✅ Submit button clicked")
+
+            # Confirm submission by waiting for Submit button to disappear/detach
+            try:
+                wait.until(lambda d: len(d.find_elements(
+                    By.XPATH,
+                    "//button[@type='submit' and contains(normalize-space(.), 'Submit')]"
+                )) == 0)
+                print("✅ Submission confirmed (Submit button disappeared)")
+            except Exception:
+                print("⚠️  Submit button still visible; continuing to verification")
             
             # Refresh page before verification
             print("\n🔄 Refreshing page to verify submission...")
-            time.sleep(3)
+            time.sleep(2)
             driver.get("https://kalvium.community/internships")
             time.sleep(3)
             
