@@ -84,6 +84,12 @@ def _load_auth_state():
 def _normalize_cookie(cookie):
     """Prepare cookie dict for Selenium add_cookie constraints."""
     allowed = {"name", "value", "path", "domain", "secure", "httpOnly", "expiry", "sameSite"}
+
+    # Playwright uses "expires", Selenium uses "expiry" — convert the field name
+    if "expires" in cookie and "expiry" not in cookie:
+        cookie = dict(cookie)  # shallow copy to avoid mutating original
+        cookie["expiry"] = cookie.pop("expires")
+
     cleaned = {k: v for k, v in cookie.items() if k in allowed}
 
     # Selenium expects int expiry when present
@@ -136,11 +142,16 @@ def _apply_auth_state(driver, state):
         cookies_by_domain.setdefault(domain, []).append(c)
 
     applied_count = 0
+    rejected_count = 0
 
     for domain, domain_cookies in cookies_by_domain.items():
         try:
             driver.get(f"https://{domain}")
             time.sleep(0.5)
+
+            # Clear server-set cookies BEFORE adding ours so they don't conflict
+            driver.delete_all_cookies()
+
             for raw_cookie in domain_cookies:
                 cookie = _normalize_cookie(raw_cookie)
                 if not cookie:
@@ -148,9 +159,10 @@ def _apply_auth_state(driver, state):
                 try:
                     driver.add_cookie(cookie)
                     applied_count += 1
-                except Exception:
-                    # Some cookies may be rejected due to domain/path constraints; continue best-effort
-                    pass
+                except Exception as e:
+                    rejected_count += 1
+                    if rejected_count <= 5:  # log first few for debugging
+                        print(f"  ⚠️  Cookie rejected ({cookie.get('name')}): {e}")
         except Exception:
             continue
 
@@ -172,6 +184,8 @@ def _apply_auth_state(driver, state):
             continue
 
     print(f"🔐 Applied {applied_count} cookies from AUTH_STATE.")
+    if rejected_count:
+        print(f"  ⚠️  {rejected_count} cookies were rejected by the browser.")
     if origins:
         print(f"🧠 Restored localStorage for {len(origins)} origin(s).")
 
@@ -188,6 +202,10 @@ def _export_auth_state(driver, output_file: Path):
             driver.get(domain)
             time.sleep(0.5)
             cookies = driver.get_cookies() or []
+            # Selenium returns "expiry", Playwright expects "expires" — include both
+            for c in cookies:
+                if "expiry" in c and "expires" not in c:
+                    c["expires"] = c["expiry"]
             state["cookies"].extend(cookies)
 
             local_data = driver.execute_script(
@@ -314,15 +332,12 @@ try:
     if auth_state:
         print("🔐 Step 0: Attempting session restore from AUTH_STATE...")
         auth_state_applied = _apply_auth_state(driver, auth_state)
-        if auth_state_applied:
-            driver.get("https://kalvium.community")
-            time.sleep(3)
-        else:
+        if not auth_state_applied:
             auth_state_refresh_needed = True
 
-    # Step 1: Check if Google is already logged in (via auth state or Chrome profile)
-    # If auth state was applied, skip the Google check — navigating to accounts.google.com
-    # can invalidate cookies or cause session interference (the Playwright script never does this).
+    # Step 1: Check Google login status
+    # When AUTH_STATE was applied, skip entirely — Playwright never visits Google or the
+    # homepage; it goes straight to /internships. Extra navigations can kill the session.
     if auth_state_applied:
         print("🔐 Step 1: Skipping Google check (AUTH_STATE applied, trusting session)")
         needs_login = False
@@ -384,39 +399,41 @@ try:
         if SAVE_AUTH_STATE or auth_state_refresh_needed:
             _export_auth_state(driver, AUTH_STATE_FILE)
     
-    # Step 2: Now visit Kalvium and use Google SSO
-    print("\n📍 Step 2: Visiting Kalvium.community...")
-    driver.get("https://kalvium.community")
-    time.sleep(3)
-
-    # Check if already logged into Kalvium
-    profile_found = _is_kalvium_profile_visible(driver)
-    
-    if profile_found:
-        print("✅ Already logged into Kalvium!")
-    else:
-        print("🔍 Looking for 'Continue with Google' button...")
-        time.sleep(2)
-
-        google_btn = _find_continue_with_google_button(driver)
-        
-        if not google_btn:
-            raise Exception("Can't find Google button on Kalvium")
-        
-        print("🖱️  Clicking 'Continue with Google'...")
-        driver.execute_script("arguments[0].click();", google_btn)
+    # Step 2: Visit Kalvium and use Google SSO (only when AUTH_STATE was NOT used)
+    # Playwright flow: storageState → go directly to /internships. No homepage visit.
+    if not auth_state_applied:
+        print("\n📍 Step 2: Visiting Kalvium.community...")
+        driver.get("https://kalvium.community")
         time.sleep(3)
 
-        # Wait for Kalvium profile to load after OAuth
-        print("⏳ Waiting for Kalvium profile to load...")
-        profile_found = _wait_for_kalvium_profile(driver, timeout_seconds=30)
-        if profile_found:
-            print("✅ Kalvium login complete! Profile found.")
+        profile_found = _is_kalvium_profile_visible(driver)
 
-        if not profile_found:
-            print("⚠️  Timeout, but continuing...")
+        if profile_found:
+            print("✅ Already logged into Kalvium!")
+        else:
+            print("🔍 Looking for 'Continue with Google' button...")
+            time.sleep(2)
+
+            google_btn = _find_continue_with_google_button(driver)
+
+            if not google_btn:
+                raise Exception("Can't find Google button on Kalvium")
+
+            print("🖱️  Clicking 'Continue with Google'...")
+            driver.execute_script("arguments[0].click();", google_btn)
+            time.sleep(3)
+
+            print("⏳ Waiting for Kalvium profile to load...")
+            profile_found = _wait_for_kalvium_profile(driver, timeout_seconds=30)
+            if profile_found:
+                print("✅ Kalvium login complete! Profile found.")
+
+            if not profile_found:
+                print("⚠️  Timeout, but continuing...")
+    else:
+        print("\n📍 Step 2: Skipping homepage (AUTH_STATE applied, going direct to /internships)")
     
-    # Go to internships
+    # Go to internships (Playwright: page.goto('/internships') — the ONLY navigation)
     print("📍 Navigating to /internships...")
     driver.get("https://kalvium.community/internships")
     time.sleep(3)
