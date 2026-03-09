@@ -245,26 +245,52 @@ def _find_continue_with_google_button(driver):
     """Find and return the Google login button element, if present."""
     return driver.execute_script("""
         let buttons = Array.from(document.querySelectorAll('button'));
-        // 1) Try text match first
+
+        // 1) innerText match — only visible rendered text (skips SVG internals)
+        let byInner = buttons.find(b => {
+            let t = (b.innerText || '').toLowerCase();
+            return (t.includes('continue with google') ||
+                    t.includes('login with google') ||
+                    t.includes('log in with google') ||
+                    t.includes('sign in with google'));
+        });
+        if (byInner) return byInner;
+
+        // 2) textContent match — broader, may include SVG content
         let byText = buttons.find(b => {
             let t = (b.textContent || '').toLowerCase();
             return (t.includes('continue with google') ||
                     t.includes('login with google') ||
                     t.includes('log in with google') ||
-                    t.includes('sign in with google') ||
-                    t.includes('google'));
+                    t.includes('sign in with google'));
         });
         if (byText) return byText;
-        // 2) Fallback: match by the distinctive CSS classes on the Kalvium login button
-        let byCss = document.querySelector('button.border-gray-800.bg-white.text-gray-800');
-        if (byCss) return byCss;
-        // 3) Broader fallback: button containing a Google SVG/icon
-        let byIcon = buttons.find(b => {
-            let svg = b.querySelector('svg');
-            let img = b.querySelector('img[src*="google"], img[alt*="oogle"]');
-            return (svg && b.className.includes('border')) || img;
+
+        // 3) aria-label match
+        let byAria = buttons.find(b => {
+            let label = (b.getAttribute('aria-label') || '').toLowerCase();
+            return label.includes('google');
         });
-        return byIcon || null;
+        if (byAria) return byAria;
+
+        // 4) Exact CSS classes from the Kalvium login button (flex layout + border-gray-800 + gap-4)
+        let byCss = document.querySelector('button.gap-4.border-gray-800');
+        if (byCss) return byCss;
+        byCss = document.querySelector('button.border-gray-800.bg-white.text-gray-800');
+        if (byCss) return byCss;
+
+        // 5) Button containing a Google SVG/icon with the login-button layout classes
+        let byIcon = buttons.find(b => {
+            let hasSvg = b.querySelector('svg');
+            let hasImg = b.querySelector('img[src*="google"], img[alt*="oogle"]');
+            let cls = b.className || '';
+            return (hasSvg || hasImg) && cls.includes('gap-4') && cls.includes('border');
+        });
+        if (byIcon) return byIcon;
+
+        // 6) Broadest: any button mentioning 'google' in innerText
+        let byBroad = buttons.find(b => (b.innerText || '').toLowerCase().includes('google'));
+        return byBroad || null;
     """)
 
 
@@ -461,16 +487,52 @@ try:
     except Exception:
         pass
 
+    # KEY DIFFERENCE from Playwright: storageState injects cookies BEFORE the first
+    # request, but Selenium adds them AFTER a page load. A refresh forces the browser
+    # to send our cookies with a fresh HTTP request, so the server returns the
+    # authenticated page and the SPA initializes properly.
+    if auth_state_applied:
+        print("🔄 Refreshing to ensure cookies take effect (Selenium ≠ Playwright storageState)...")
+        driver.refresh()
+        time.sleep(3)
+        try:
+            wait.until(lambda d: d.execute_script("return document.readyState") in {"interactive", "complete"})
+        except Exception:
+            pass
+
     # Auto-handle Google SSO redirect if site still shows login page.
     # Even with cookies applied, the Kalvium SPA sometimes needs to go through the
     # Google OAuth redirect to establish an authenticated session. The cookies we applied
     # make this redirect seamless (no password prompt). The site sometimes requires this
-    # twice ("double login" — a known site quirk).
-    for sso_attempt in range(1, 3):  # up to 2 attempts
+    # multiple times ("double login" — a known site quirk).
+    for sso_attempt in range(1, 4):  # up to 3 attempts
         google_btn = _find_continue_with_google_button(driver)
         if not google_btn:
             break  # No login button = we're authenticated
-        print(f"🔄 Login page detected (attempt {sso_attempt}/2), clicking 'Continue with Google'...")
+
+        # Log what we found for CI diagnostics
+        btn_info = driver.execute_script("""
+            let b = arguments[0];
+            return {
+                innerText: (b.innerText || '').trim().substring(0, 80),
+                ariaLabel: b.getAttribute('aria-label') || '',
+                classes: (b.className || '').substring(0, 100)
+            };
+        """, google_btn)
+        print(f"🔄 Login page detected (attempt {sso_attempt}/3)")
+        print(f"   Button: text='{btn_info.get('innerText', '')}', aria='{btn_info.get('ariaLabel', '')}', classes='{btn_info.get('classes', '')[:60]}'")
+
+        # Attempt 1: try a plain refresh first — cookies might just need a clean request
+        if sso_attempt == 1 and auth_state_applied:
+            print("   Trying refresh before clicking (cookies may just need a clean request)...")
+            driver.refresh()
+            time.sleep(3)
+            # Re-check: if button is gone after refresh, we're good
+            if not _find_continue_with_google_button(driver):
+                print("   ✅ Refresh worked — login page gone!")
+                break
+
+        print(f"   Clicking Google login button...")
         driver.execute_script("arguments[0].click();", google_btn)
         time.sleep(5)
         # After OAuth redirect, may land back on homepage — navigate back to internships
